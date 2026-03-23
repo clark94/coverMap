@@ -7,8 +7,8 @@ from math import radians, sin, cos, sqrt, atan2
 import io
 import json
 from datetime import datetime, date
-import gspread
-from google.oauth2.service_account import Credentials
+# import gspread
+# from google.oauth2.service_account import Credentials
 
 # ─────────────────────────────────────────────
 # CONFIG
