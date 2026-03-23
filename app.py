@@ -6,9 +6,10 @@ from streamlit_folium import st_folium
 from math import radians, sin, cos, sqrt, atan2
 import io
 import json
+import hashlib
 from datetime import datetime, date
-# import gspread
-# from google.oauth2.service_account import Credentials
+import gspread
+from google.oauth2.service_account import Credentials
 
 # ─────────────────────────────────────────────
 # CONFIG
@@ -53,6 +54,19 @@ html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
     background: white; border: 1px solid #e2e8f0; border-radius: 16px;
     padding: 1.8rem; box-shadow: 0 2px 8px rgba(0,0,0,0.06);
 }
+.login-box {
+    max-width: 420px; margin: 4rem auto;
+    background: white; border-radius: 20px;
+    padding: 2.5rem; box-shadow: 0 8px 32px rgba(0,0,0,0.10);
+    border: 1px solid #e2e8f0;
+}
+.login-title {
+    font-family:'Syne',sans-serif; font-size:1.6rem; font-weight:800;
+    color:#0f172a; margin:0 0 0.3rem; text-align:center;
+}
+.login-sub { color:#64748b; font-size:0.85rem; text-align:center; margin-bottom:2rem; }
+.badge-admin { background:#fef3c7; color:#92400e; padding:2px 10px; border-radius:999px; font-size:0.72rem; font-weight:600; }
+.badge-delegue { background:#dbeafe; color:#1e40af; padding:2px 10px; border-radius:999px; font-size:0.72rem; font-weight:600; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -68,8 +82,11 @@ def haversine(lat1, lon1, lat2, lon2):
     a = sin(dlat/2)**2 + cos(radians(lat1)) * cos(radians(lat2)) * sin(dlon/2)**2
     return R * 2 * atan2(sqrt(a), sqrt(1 - a))
 
+def hash_password(password: str) -> str:
+    return hashlib.sha256(password.encode()).hexdigest()
+
 # ─────────────────────────────────────────────
-# CONNEXION GOOGLE SHEETS
+# CONNEXION GOOGLE SHEETS — AVEC GESTION D'ERREUR
 # ─────────────────────────────────────────────
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
@@ -78,25 +95,104 @@ SCOPES = [
 
 @st.cache_resource
 def get_gsheet_client():
-    """Connexion au compte de service Google via les secrets Streamlit."""
-    creds_dict = json.loads(st.secrets["GOOGLE_CREDENTIALS"])
-    creds = Credentials.from_service_account_info(creds_dict, scopes=SCOPES)
-    return gspread.authorize(creds)
+    """Connexion Google Sheets — affiche une erreur claire si les secrets manquent."""
+    try:
+        creds_dict = json.loads(st.secrets["GOOGLE_CREDENTIALS"])
+        creds = Credentials.from_service_account_info(creds_dict, scopes=SCOPES)
+        return gspread.authorize(creds)
+    except KeyError:
+        st.error("❌ Secret 'GOOGLE_CREDENTIALS' manquant. Configurez-le dans Streamlit Cloud → Settings → Secrets.")
+        st.stop()
+    except Exception as e:
+        st.error(f"❌ Connexion Google Sheets impossible : {e}")
+        st.stop()
 
 def get_sheet(sheet_name: str):
-    """Retourne un onglet du Google Spreadsheet."""
-    client = get_gsheet_client()
-    spreadsheet_id = st.secrets["SPREADSHEET_ID"]
-    spreadsheet = client.open_by_key(spreadsheet_id)
-    return spreadsheet.worksheet(sheet_name)
+    """Récupère un onglet Google Sheets — avec gestion d'erreur propre."""
+    try:
+        client = get_gsheet_client()
+        spreadsheet_id = st.secrets.get("SPREADSHEET_ID", "")
+        if not spreadsheet_id:
+            st.error("❌ Secret 'SPREADSHEET_ID' manquant. Configurez-le dans Streamlit Cloud → Settings → Secrets.")
+            st.stop()
+        spreadsheet = client.open_by_key(spreadsheet_id)
+        return spreadsheet.worksheet(sheet_name)
+    except Exception as e:
+        st.error(f"❌ Impossible d'accéder à l'onglet '{sheet_name}' : {e}")
+        st.stop()
 
 # ─────────────────────────────────────────────
-# CHARGEMENT DONNÉES (depuis Google Sheets)
+# AUTHENTIFICATION
 # ─────────────────────────────────────────────
-@st.cache_data(ttl=300)  # cache 5 minutes
+@st.cache_data(ttl=120)
+def load_utilisateurs():
+    try:
+        ws = get_sheet("utilisateurs")
+        data = ws.get_all_records()
+        return pd.DataFrame(data) if data else pd.DataFrame(
+            columns=["email","password_hash","nom","role","actif"]
+        )
+    except Exception:
+        return pd.DataFrame(columns=["email","password_hash","nom","role","actif"])
+
+def verifier_login(email: str, password: str):
+    users = load_utilisateurs()
+    if users.empty:
+        return None
+    pwd_hash = hash_password(password)
+    match = users[
+        (users["email"].str.lower() == email.lower()) &
+        (users["password_hash"] == pwd_hash) &
+        (users["actif"].astype(str).str.upper().isin(["OUI","TRUE","1","YES"]))
+    ]
+    return match.iloc[0].to_dict() if len(match) > 0 else None
+
+# ─────────────────────────────────────────────
+# PAGE DE LOGIN
+# ─────────────────────────────────────────────
+def page_login():
+    st.markdown("""
+    <div style='text-align:center;padding:2rem 0 0'>
+        <p style='font-family:Syne,sans-serif;font-size:2.2rem;font-weight:800;color:#0f172a;margin:0'>🗺️ CoverMap</p>
+        <p style='color:#64748b;font-size:0.9rem;margin:0.3rem 0 2rem'>Analyse terrain délégués</p>
+    </div>
+    """, unsafe_allow_html=True)
+
+    col_left, col_center, col_right = st.columns([1, 1.2, 1])
+    with col_center:
+        st.markdown("<div class='login-box'>", unsafe_allow_html=True)
+        st.markdown("<p class='login-title'>Connexion</p>", unsafe_allow_html=True)
+        st.markdown("<p class='login-sub'>Entrez vos identifiants pour accéder à l'app</p>", unsafe_allow_html=True)
+
+        email    = st.text_input("📧 Email", placeholder="votre.email@entreprise.com", key="login_email")
+        password = st.text_input("🔒 Mot de passe", type="password", placeholder="••••••••", key="login_pwd")
+
+        st.markdown("<br>", unsafe_allow_html=True)
+        if st.button("Se connecter →", use_container_width=True, type="primary"):
+            if not email or not password:
+                st.error("Veuillez remplir tous les champs.")
+            else:
+                user = verifier_login(email, password)
+                if user:
+                    st.session_state["user"] = user
+                    st.session_state["logged_in"] = True
+                    st.rerun()
+                else:
+                    st.error("❌ Email ou mot de passe incorrect, ou compte désactivé.")
+
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    st.markdown("""
+    <p style='text-align:center;color:#94a3b8;font-size:0.75rem;margin-top:1.5rem'>
+        Problème de connexion ? Contactez votre administrateur.
+    </p>
+    """, unsafe_allow_html=True)
+
+# ─────────────────────────────────────────────
+# CHARGEMENT DONNÉES
+# ─────────────────────────────────────────────
+@st.cache_data(ttl=300)
 def load_data():
-    """Charge délégués, médecins France et réseau depuis Google Sheets."""
-    # ── Délégués ──
     ws_del = get_sheet("delegues")
     del_raw = pd.DataFrame(ws_del.get_all_records())
     delegues = (
@@ -112,39 +208,33 @@ def load_data():
         .rename(columns={"Field rep": "nom"})
     )
 
-    # ── Médecins France ──
     ws_med = get_sheet("medecins_france")
     med_france = pd.DataFrame(ws_med.get_all_records())
     med_france["latitude"]  = pd.to_numeric(med_france["latitude"],  errors="coerce")
     med_france["longitude"] = pd.to_numeric(med_france["longitude"], errors="coerce")
     med_france = med_france.dropna(subset=["latitude", "longitude"])
 
-    # ── Réseau ──
     ws_res = get_sheet("medecins_reseaux")
-    med_reseau = pd.DataFrame(ws_res.get_all_records())
-    med_reseau["latitude"]  = pd.to_numeric(med_reseau.get("Site Latitude",  pd.Series()), errors="coerce")
-    med_reseau["longitude"] = pd.to_numeric(med_reseau.get("Site Longitude", pd.Series()), errors="coerce")
-    med_reseau = med_reseau.dropna(subset=["latitude", "longitude"])
-    med_reseau["nom"]                = med_reseau.get("Room Doctor First", pd.Series(["—"]*len(med_reseau)))
-    med_reseau["commune"]            = med_reseau.get("Site City",         pd.Series(["—"]*len(med_reseau)))
-    med_reseau["specialite_libelle"] = med_reseau.get("Audience Group",    pd.Series(["—"]*len(med_reseau)))
+    med_reseau_raw = pd.DataFrame(ws_res.get_all_records())
+    med_reseau_raw["latitude"]  = pd.to_numeric(med_reseau_raw.get("Site Latitude",  pd.Series(dtype=float)), errors="coerce")
+    med_reseau_raw["longitude"] = pd.to_numeric(med_reseau_raw.get("Site Longitude", pd.Series(dtype=float)), errors="coerce")
+    med_reseau_raw = med_reseau_raw.dropna(subset=["latitude", "longitude"])
+    med_reseau_raw["nom"]                = med_reseau_raw["Room Doctor First"] if "Room Doctor First" in med_reseau_raw.columns else "—"
+    med_reseau_raw["commune"]            = med_reseau_raw["Site City"]         if "Site City"         in med_reseau_raw.columns else "—"
+    med_reseau_raw["specialite_libelle"] = med_reseau_raw["Audience Group"]    if "Audience Group"    in med_reseau_raw.columns else "—"
 
-    return delegues, med_france, med_reseau
+    return delegues, med_france, med_reseau_raw
 
-@st.cache_data(ttl=60)  # cache 1 minute pour les visites (mis à jour souvent)
+@st.cache_data(ttl=60)
 def load_visites():
-    """Charge les visites terrain depuis Google Sheets."""
     try:
         ws = get_sheet("visites_terrain")
         data = ws.get_all_records()
-        if data:
-            return pd.DataFrame(data)
-        else:
-            return pd.DataFrame(columns=[
-                "id","date","delegue","medecin","specialite","ville",
-                "type_visite","affiche_deposee","presentoir","commentaire",
-                "latitude","longitude","saisie_le"
-            ])
+        return pd.DataFrame(data) if data else pd.DataFrame(columns=[
+            "id","date","delegue","medecin","specialite","ville",
+            "type_visite","affiche_deposee","presentoir","commentaire",
+            "latitude","longitude","saisie_le"
+        ])
     except Exception:
         return pd.DataFrame(columns=[
             "id","date","delegue","medecin","specialite","ville",
@@ -153,27 +243,18 @@ def load_visites():
         ])
 
 def save_visite(row_dict: dict):
-    """Ajoute une visite dans Google Sheets et vide le cache."""
     ws = get_sheet("visites_terrain")
     existing = ws.get_all_records()
     row_dict["id"]        = len(existing) + 1
     row_dict["saisie_le"] = datetime.now().strftime("%Y-%m-%d %H:%M")
-
-    # S'assurer que les colonnes correspondent à l'ordre de l'onglet
     headers = [
         "id","date","delegue","medecin","specialite","ville",
         "type_visite","affiche_deposee","presentoir","commentaire",
         "latitude","longitude","saisie_le"
     ]
-    row_values = [str(row_dict.get(h, "")) for h in headers]
-    ws.append_row(row_values)
-
-    # Vider le cache des visites pour que les autres voient la mise à jour
+    ws.append_row([str(row_dict.get(h, "")) for h in headers])
     load_visites.clear()
 
-# ─────────────────────────────────────────────
-# CALCUL COUVERTURE
-# ─────────────────────────────────────────────
 @st.cache_data
 def calc_couverture(delegues_json, med_france):
     delegues = pd.read_json(io.StringIO(delegues_json))
@@ -188,9 +269,6 @@ def calc_couverture(delegues_json, med_france):
         med.loc[mask & (med["delegue_zone"] == ""), "delegue_zone"] = d["nom"]
     return med
 
-# ─────────────────────────────────────────────
-# EXPORT EXCEL
-# ─────────────────────────────────────────────
 def export_excel(delegues, med_couverts, med_non_couverts, med_reseau, visites):
     buffer = io.BytesIO()
     with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
@@ -201,41 +279,118 @@ def export_excel(delegues, med_couverts, med_non_couverts, med_reseau, visites):
                        len(med_couverts), len(med_non_couverts), len(med_reseau),
                        f"{taux}%", len(visites), datetime.now().strftime("%d/%m/%Y %H:%M")]
         }).to_excel(writer, sheet_name="Résumé", index=False)
-
         delegues[["nom","region","region_group","nb_visites"]].rename(columns={
             "nom":"Délégué","region":"Région","region_group":"Groupe","nb_visites":"Visites"
         }).to_excel(writer, sheet_name="Délégués", index=False)
-
         cols = ["nom","prenom","specialite_libelle","commune","couvert","delegue_zone"]
         cols_ok = [c for c in cols if c in med_couverts.columns]
         med_couverts[cols_ok].to_excel(writer, sheet_name="Médecins couverts", index=False)
-        med_non_couverts[[c for c in cols if c in med_non_couverts.columns]].to_excel(writer, sheet_name="Non couverts", index=False)
-
+        cols_ok2 = [c for c in cols if c in med_non_couverts.columns]
+        med_non_couverts[cols_ok2].to_excel(writer, sheet_name="Non couverts", index=False)
         if len(visites) > 0:
             visites.to_excel(writer, sheet_name="Visites terrain", index=False)
-
     buffer.seek(0)
     return buffer
 
 # ─────────────────────────────────────────────
-# CHARGEMENT
+# PAGE ADMIN — GESTION UTILISATEURS
 # ─────────────────────────────────────────────
+def page_admin_users():
+    st.markdown("### 👥 Gestion des utilisateurs")
+    st.info("Seul l'administrateur voit cette page. Les modifications sont sauvegardées dans Google Sheets.")
+
+    users = load_utilisateurs()
+
+    if not users.empty:
+        st.markdown("#### Comptes existants")
+        display = users[["email","nom","role","actif"]].copy()
+        display.columns = ["Email","Nom","Rôle","Actif"]
+        st.dataframe(display, use_container_width=True, hide_index=True)
+    st.divider()
+
+    st.markdown("#### ➕ Ajouter un délégué")
+    c1, c2 = st.columns(2)
+    with c1:
+        new_email = st.text_input("Email", placeholder="jean.dupont@entreprise.com", key="new_email")
+        new_nom   = st.text_input("Nom complet", placeholder="Jean Dupont", key="new_nom")
+    with c2:
+        new_role  = st.selectbox("Rôle", ["delegue","admin"], key="new_role")
+        new_pwd   = st.text_input("Mot de passe initial", type="password", placeholder="Min. 6 caractères", key="new_pwd")
+
+    if st.button("✅ Créer le compte", type="primary"):
+        if not new_email or not new_nom or not new_pwd:
+            st.warning("Tous les champs sont obligatoires.")
+        elif len(new_pwd) < 6:
+            st.warning("Le mot de passe doit faire au moins 6 caractères.")
+        else:
+            try:
+                ws = get_sheet("utilisateurs")
+                if users.empty:
+                    ws.append_row(["email","password_hash","nom","role","actif"])
+                ws.append_row([new_email.lower(), hash_password(new_pwd), new_nom, new_role, "OUI"])
+                load_utilisateurs.clear()
+                st.success(f"✅ Compte créé pour **{new_nom}** ({new_email})")
+                st.rerun()
+            except Exception as e:
+                st.error(f"Erreur : {e}")
+
+    st.divider()
+
+    if not users.empty:
+        st.markdown("#### 🚫 Désactiver un compte")
+        actifs = users[users["actif"].astype(str).str.upper().isin(["OUI","TRUE","1","YES"])]["email"].tolist()
+        if actifs:
+            email_desact = st.selectbox("Choisir le compte à désactiver", actifs, key="desact_email")
+            if st.button("Désactiver ce compte", type="secondary"):
+                try:
+                    ws = get_sheet("utilisateurs")
+                    cell = ws.find(email_desact)
+                    ws.update_cell(cell.row, users.columns.get_loc("actif") + 1, "NON")
+                    load_utilisateurs.clear()
+                    st.success(f"✅ Compte **{email_desact}** désactivé.")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Erreur : {e}")
+
+# ══════════════════════════════════════════════
+# POINT D'ENTRÉE PRINCIPAL
+# ══════════════════════════════════════════════
+
+if "logged_in" not in st.session_state:
+    st.session_state["logged_in"] = False
+
+if not st.session_state["logged_in"]:
+    page_login()
+    st.stop()
+
+# ─────────────────────────────────────────────
+# APP PRINCIPALE (utilisateur connecté)
+# ─────────────────────────────────────────────
+user     = st.session_state["user"]
+is_admin = user.get("role", "delegue") == "admin"
+
 try:
     delegues, med_france, med_reseau = load_data()
     visites_df = load_visites()
 except Exception as e:
-    st.error(f"❌ Impossible de se connecter à Google Sheets : {e}")
-    st.info("Vérifiez que les secrets `GOOGLE_CREDENTIALS` et `SPREADSHEET_ID` sont bien configurés dans Streamlit Cloud.")
+    st.error(f"❌ Erreur de chargement des données : {e}")
     st.stop()
 
-# Filtres sidebar
+# ── SIDEBAR ──
 with st.sidebar:
-    st.markdown("""
+    st.markdown(f"""
     <div style='padding: 1rem 0 0.5rem'>
-        <p style='font-family:Syne,sans-serif;font-weight:800;font-size:1.1rem;color:#f0f9ff;margin:0'>
-            🗺️ CoverMap
-        </p>
-        <p style='font-size:0.72rem;color:#64748b;margin:0.2rem 0 1.2rem'>Analyse terrain délégués</p>
+        <p style='font-family:Syne,sans-serif;font-weight:800;font-size:1.1rem;color:#f0f9ff;margin:0'>🗺️ CoverMap</p>
+        <p style='font-size:0.72rem;color:#64748b;margin:0.2rem 0 0.5rem'>Analyse terrain délégués</p>
+        <div style='background:#1e293b;border-radius:8px;padding:0.6rem 0.8rem;margin-bottom:1rem'>
+            <p style='font-size:0.78rem;color:#7dd3fc;margin:0;font-weight:600'>👤 {user["nom"]}</p>
+            <p style='font-size:0.68rem;color:#475569;margin:0'>{user["email"]}</p>
+            <span style='font-size:0.65rem;background:{"#fef3c7" if is_admin else "#dbeafe"};
+                         color:{"#92400e" if is_admin else "#1e40af"};
+                         padding:1px 7px;border-radius:999px;font-weight:600;'>
+                {"⭐ Admin" if is_admin else "🏃 Délégué"}
+            </span>
+        </div>
     </div>""", unsafe_allow_html=True)
 
     st.markdown("**Couches carte**")
@@ -243,12 +398,12 @@ with st.sidebar:
     show_france      = st.checkbox("🔵 Médecins France",   value=True)
     show_reseau      = st.checkbox("🟢 Réseau IDF",        value=True)
     show_zones       = st.checkbox("⭕ Zones 30 KM",       value=True)
-    show_couverts    = st.checkbox("✅ Médecins couverts",  value=True)
+    show_couverts    = st.checkbox("✅ Couverts",           value=True)
     show_noncouverts = st.checkbox("❌ Non couverts",       value=True)
 
     st.divider()
     st.markdown("**Groupe région**")
-    groupes = ["Tous"] + sorted(delegues["region_group"].dropna().unique().tolist())
+    groupes    = ["Tous"] + sorted(delegues["region_group"].dropna().unique().tolist())
     groupe_sel = st.selectbox("Groupe", groupes, label_visibility="collapsed")
 
     st.markdown("**Région**")
@@ -259,9 +414,14 @@ with st.sidebar:
     region_sel = st.selectbox("Région", regions, label_visibility="collapsed")
 
     st.divider()
-    if st.button("🔄 Rafraîchir les données", use_container_width=True):
+    if st.button("🔄 Rafraîchir", use_container_width=True):
         load_data.clear()
         load_visites.clear()
+        st.rerun()
+
+    st.markdown("<br>", unsafe_allow_html=True)
+    if st.button("🚪 Se déconnecter", use_container_width=True):
+        st.session_state.clear()
         st.rerun()
 
 # Filtrage délégués
@@ -273,14 +433,11 @@ if region_sel != "Toutes":
 
 # Calcul couverture
 med_avec_couverture = calc_couverture(del_f.to_json(), med_france)
-med_couverts     = med_avec_couverture[med_avec_couverture["couvert"] == True]
-med_non_couverts = med_avec_couverture[med_avec_couverture["couvert"] == False]
-nb_reseau  = len(med_reseau)
-taux_couv  = round(len(med_couverts) / max(len(med_avec_couverture), 1) * 100, 1)
+med_couverts     = med_avec_couverture[med_avec_couverture["couvert"] == True].copy()
+med_non_couverts = med_avec_couverture[med_avec_couverture["couvert"] == False].copy()
+taux_couv        = round(len(med_couverts) / max(len(med_avec_couverture), 1) * 100, 1)
 
-# ─────────────────────────────────────────────
-# HEADER
-# ─────────────────────────────────────────────
+# ── HEADER ──
 st.markdown(f"""
 <div class="hero">
     <p class="hero-title">🗺️ CoverMap — Analyse Terrain Délégués</p>
@@ -310,12 +467,14 @@ st.markdown(f"""
 </div>
 """, unsafe_allow_html=True)
 
-# ─────────────────────────────────────────────
-# TABS
-# ─────────────────────────────────────────────
-tab1, tab2, tab3, tab4, tab5 = st.tabs([
-    "🗺️ Carte", "📝 Saisie terrain", "📋 Historique visites", "🔍 Tableau filtré", "📥 Export"
-])
+# ── TABS ──
+tabs_list = ["🗺️ Carte", "📝 Saisie terrain", "📋 Historique visites", "🔍 Tableau filtré", "📥 Export"]
+if is_admin:
+    tabs_list.append("⚙️ Utilisateurs")
+
+all_tabs = st.tabs(tabs_list)
+tab1, tab2, tab3, tab4, tab5 = all_tabs[:5]
+tab_admin = all_tabs[5] if is_admin else None
 
 # ══════════════════════════════════════════════
 # TAB 1 — CARTE
@@ -330,19 +489,17 @@ with tab1:
         if show_zones:
             for _, d in del_f.iterrows():
                 folium.Circle(
-                    location=[d.latitude, d.longitude],
-                    radius=RAYON_KM * 1000,
-                    color="#ef4444", fill=True,
-                    fill_color="#fca5a5", fill_opacity=0.08, weight=1.5,
-                    dash_array="6"
+                    location=[d.latitude, d.longitude], radius=RAYON_KM*1000,
+                    color="#ef4444", fill=True, fill_color="#fca5a5",
+                    fill_opacity=0.08, weight=1.5, dash_array="6"
                 ).add_to(m)
 
         if show_france and show_couverts:
             for _, med in med_couverts.iterrows():
                 folium.CircleMarker(
                     location=[med.latitude, med.longitude],
-                    radius=4, color="#3b82f6",
-                    fill=True, fill_color="#3b82f6", fill_opacity=0.8, weight=1,
+                    radius=4, color="#3b82f6", fill=True,
+                    fill_color="#3b82f6", fill_opacity=0.8, weight=1,
                     tooltip=folium.Tooltip(
                         f"🔵 {med.get('nom','?')} {med.get('prenom','')}<br>"
                         f"{med.get('specialite_libelle','—')} — {med.get('commune','—')}<br>"
@@ -354,8 +511,8 @@ with tab1:
             for _, med in med_non_couverts.iterrows():
                 folium.CircleMarker(
                     location=[med.latitude, med.longitude],
-                    radius=4, color="#ef4444",
-                    fill=True, fill_color="#ef4444", fill_opacity=0.8, weight=1,
+                    radius=4, color="#ef4444", fill=True,
+                    fill_color="#ef4444", fill_opacity=0.8, weight=1,
                     tooltip=folium.Tooltip(
                         f"🔴 {med.get('nom','?')} {med.get('prenom','')}<br>"
                         f"{med.get('specialite_libelle','—')} — {med.get('commune','—')}<br>"
@@ -367,8 +524,8 @@ with tab1:
             for _, med in med_reseau.iterrows():
                 folium.CircleMarker(
                     location=[med.latitude, med.longitude],
-                    radius=5, color="#10b981",
-                    fill=True, fill_color="#10b981", fill_opacity=0.85, weight=1.5,
+                    radius=5, color="#10b981", fill=True,
+                    fill_color="#10b981", fill_opacity=0.85, weight=1.5,
                     tooltip=folium.Tooltip(
                         f"🟢 {med.get('nom','—')}<br>"
                         f"{med.get('specialite_libelle','—')} — {med.get('commune','—')}"
@@ -396,8 +553,7 @@ with tab1:
         <div style='background:white;border:1px solid #e2e8f0;border-radius:12px;padding:1rem;font-size:.8rem;'>
             <p style='font-family:Syne,sans-serif;font-weight:700;font-size:.85rem;color:#0f172a;margin:0 0 1rem'>Légende</p>
             <div style='display:flex;align-items:center;gap:.5rem;margin-bottom:.4rem'>
-                <div style='width:13px;height:13px;border-radius:50%;background:#ef4444;flex-shrink:0'></div>
-                <span>Délégué</span>
+                <div style='width:13px;height:13px;border-radius:50%;background:#ef4444;flex-shrink:0'></div><span>Délégué</span>
             </div>
             <div style='display:flex;align-items:center;gap:.5rem;margin-bottom:.9rem'>
                 <div style='width:18px;height:18px;border-radius:50%;background:#fca5a5;border:1.5px dashed #ef4444;flex-shrink:0'></div>
@@ -426,17 +582,20 @@ with tab1:
 # ══════════════════════════════════════════════
 with tab2:
     st.markdown("### 📝 Saisie d'une visite terrain")
-    st.markdown("Le délégué remplit ce formulaire après chaque visite médecin.")
+    st.markdown(f"Connecté en tant que **{user['nom']}** — votre nom sera automatiquement enregistré.")
 
     with st.container():
         st.markdown("<div class='form-card'>", unsafe_allow_html=True)
-
         c1, c2 = st.columns(2)
         with c1:
-            delegue_sel = st.selectbox("👤 Délégué", sorted(delegues["nom"].tolist()), key="saisie_del")
+            if is_admin:
+                delegue_sel = st.selectbox("👤 Délégué", sorted(delegues["nom"].tolist()), key="saisie_del")
+            else:
+                delegue_sel = user["nom"]
+                st.text_input("👤 Délégué", value=delegue_sel, disabled=True, key="saisie_del")
             date_visite = st.date_input("📅 Date de la visite", value=date.today(), key="saisie_date")
             type_visite = st.selectbox("🏷️ Type de visite", [
-                "Visite standard", "OPE spéciale", "Formation", "Remise documentation", "Autre"
+                "Visite standard","OPE spéciale","Formation","Remise documentation","Autre"
             ], key="saisie_type")
 
         with c2:
@@ -449,12 +608,11 @@ with tab2:
 
         c3, c4 = st.columns(2)
         with c3:
-            affiche  = st.selectbox("📌 Affiche déposée ?", ["✅ Oui","❌ Non"], key="saisie_aff")
+            affiche    = st.selectbox("📌 Affiche déposée ?", ["✅ Oui","❌ Non"], key="saisie_aff")
         with c4:
             presentoir = st.selectbox("🗂️ Présentoir installé ?", ["✅ Oui","❌ Non"], key="saisie_pres")
 
         commentaire = st.text_area("💬 Commentaire", placeholder="Notes sur la visite...", key="saisie_com", height=80)
-
         st.markdown("</div>", unsafe_allow_html=True)
 
         col_btn, _ = st.columns([1, 3])
@@ -463,8 +621,9 @@ with tab2:
                 if not medecin_nom:
                     st.warning("Veuillez renseigner le nom du médecin.")
                 else:
-                    # Récupérer les coordonnées du délégué
-                    del_info = delegues[delegues["nom"] == delegue_sel].iloc[0]
+                    del_info = delegues[delegues["nom"] == delegue_sel]
+                    lat = float(del_info["latitude"].values[0]) if len(del_info) > 0 else 0
+                    lon = float(del_info["longitude"].values[0]) if len(del_info) > 0 else 0
                     save_visite({
                         "date":            str(date_visite),
                         "delegue":         delegue_sel,
@@ -475,10 +634,10 @@ with tab2:
                         "affiche_deposee": affiche,
                         "presentoir":      presentoir,
                         "commentaire":     commentaire,
-                        "latitude":        del_info["latitude"],
-                        "longitude":       del_info["longitude"],
+                        "latitude":        lat,
+                        "longitude":       lon,
                     })
-                    st.success(f"✅ Visite de **{delegue_sel}** chez **{medecin_nom}** enregistrée dans Google Sheets !")
+                    st.success("✅ Visite enregistrée dans Google Sheets !")
                     st.rerun()
 
 # ══════════════════════════════════════════════
@@ -486,23 +645,28 @@ with tab2:
 # ══════════════════════════════════════════════
 with tab3:
     st.markdown("### 📋 Historique des visites terrain")
-
-    # Recharger les visites fraîches
     visites_df = load_visites()
 
     if len(visites_df) == 0:
-        st.info("Aucune visite saisie pour l'instant. Utilisez l'onglet **Saisie terrain** pour commencer.")
+        st.info("Aucune visite saisie pour l'instant.")
     else:
         c1, c2, c3 = st.columns(3)
         with c1:
-            del_hist  = st.selectbox("Délégué", ["Tous"] + sorted(visites_df["delegue"].unique().tolist()), key="del_hist")
+            if is_admin:
+                del_hist = st.selectbox("Délégué", ["Tous"] + sorted(visites_df["delegue"].unique().tolist()), key="del_hist")
+            else:
+                del_hist = user["nom"]
+                st.text_input("Délégué", value=del_hist, disabled=True, key="del_hist_disp")
         with c2:
-            type_hist = st.selectbox("Type visite", ["Tous"] + sorted(visites_df["type_visite"].unique().tolist()), key="type_hist")
+            type_hist = st.selectbox("Type visite", ["Tous"] + sorted(visites_df["type_visite"].dropna().unique().tolist()), key="type_hist")
         with c3:
-            aff_hist  = st.selectbox("Affiche déposée", ["Tous","✅ Oui","❌ Non"], key="aff_hist")
+            aff_hist = st.selectbox("Affiche déposée", ["Tous","✅ Oui","❌ Non"], key="aff_hist")
 
         vis_filtre = visites_df.copy()
-        if del_hist  != "Tous": vis_filtre = vis_filtre[vis_filtre["delegue"]         == del_hist]
+        if not is_admin:
+            vis_filtre = vis_filtre[vis_filtre["delegue"] == user["nom"]]
+        elif del_hist != "Tous":
+            vis_filtre = vis_filtre[vis_filtre["delegue"] == del_hist]
         if type_hist != "Tous": vis_filtre = vis_filtre[vis_filtre["type_visite"]     == type_hist]
         if aff_hist  != "Tous": vis_filtre = vis_filtre[vis_filtre["affiche_deposee"] == aff_hist]
 
@@ -510,14 +674,16 @@ with tab3:
         st.divider()
 
         k1, k2, k3, k4 = st.columns(4)
-        k1.metric("Total visites",      len(vis_filtre))
-        k2.metric("Affiches déposées",  len(vis_filtre[vis_filtre["affiche_deposee"]=="✅ Oui"]))
-        k3.metric("Opé spéciales",      len(vis_filtre[vis_filtre["type_visite"].str.contains("OPE", na=False)]))
-        k4.metric("Délégués actifs",    vis_filtre["delegue"].nunique())
+        k1.metric("Total visites",     len(vis_filtre))
+        k2.metric("Affiches déposées", len(vis_filtre[vis_filtre["affiche_deposee"]=="✅ Oui"]))
+        k3.metric("Opé spéciales",     len(vis_filtre[vis_filtre["type_visite"].str.contains("OPE", na=False)]))
+        k4.metric("Délégués actifs",   vis_filtre["delegue"].nunique())
 
         st.divider()
+        cols_aff = ["date","delegue","medecin","specialite","ville","type_visite","affiche_deposee","presentoir","commentaire"]
+        cols_ok  = [c for c in cols_aff if c in vis_filtre.columns]
         st.dataframe(
-            vis_filtre[["date","delegue","medecin","specialite","ville","type_visite","affiche_deposee","presentoir","commentaire"]].rename(columns={
+            vis_filtre[cols_ok].rename(columns={
                 "date":"Date","delegue":"Délégué","medecin":"Médecin",
                 "specialite":"Spécialité","ville":"Ville","type_visite":"Type",
                 "affiche_deposee":"Affiche","presentoir":"Présentoir","commentaire":"Commentaire"
@@ -529,9 +695,9 @@ with tab3:
         vis_filtre.to_excel(buf, index=False, engine="openpyxl")
         buf.seek(0)
         st.download_button(
-            label="⬇️ Exporter l'historique en Excel",
+            label="⬇️ Exporter en Excel",
             data=buf,
-            file_name=f"visites_terrain_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
+            file_name=f"visites_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             use_container_width=True
         )
@@ -541,30 +707,29 @@ with tab3:
 # ══════════════════════════════════════════════
 with tab4:
     st.markdown("### 🔍 Tableau filtré — Médecins")
-
     c1, c2, c3, c4 = st.columns(4)
     with c1:
         statut_f = st.selectbox("Statut", ["Tous","✅ Couverts","❌ Non couverts"])
     with c2:
-        specs  = ["Toutes"] + sorted(med_avec_couverture.get("specialite_libelle", pd.Series()).dropna().unique().tolist())
-        spec_f = st.selectbox("Spécialité", specs)
+        specs_col = med_avec_couverture["specialite_libelle"].dropna().unique().tolist() if "specialite_libelle" in med_avec_couverture.columns else []
+        spec_f = st.selectbox("Spécialité", ["Toutes"] + sorted(specs_col))
     with c3:
-        communes  = ["Toutes"] + sorted(med_avec_couverture.get("commune", pd.Series()).dropna().unique().tolist())
-        commune_f = st.selectbox("Commune", communes)
+        communes_col = med_avec_couverture["commune"].dropna().unique().tolist() if "commune" in med_avec_couverture.columns else []
+        commune_f = st.selectbox("Commune", ["Toutes"] + sorted(communes_col))
     with c4:
-        del_zones  = ["Tous"] + sorted(med_couverts.get("delegue_zone", pd.Series()).dropna().unique().tolist())
-        del_zone_f = st.selectbox("Zone délégué", del_zones)
+        del_zones_col = med_couverts["delegue_zone"].dropna().unique().tolist() if "delegue_zone" in med_couverts.columns else []
+        del_zone_f = st.selectbox("Zone délégué", ["Tous"] + sorted(del_zones_col))
 
     recherche = st.text_input("🔎 Rechercher un médecin", placeholder="Nom, prénom...")
 
     med_filtre = med_avec_couverture.copy()
     if statut_f == "✅ Couverts":       med_filtre = med_filtre[med_filtre["couvert"] == True]
     elif statut_f == "❌ Non couverts": med_filtre = med_filtre[med_filtre["couvert"] == False]
-    if spec_f     != "Toutes" and "specialite_libelle" in med_filtre.columns:
+    if spec_f    != "Toutes"  and "specialite_libelle" in med_filtre.columns:
         med_filtre = med_filtre[med_filtre["specialite_libelle"] == spec_f]
-    if commune_f  != "Toutes" and "commune" in med_filtre.columns:
+    if commune_f != "Toutes"  and "commune" in med_filtre.columns:
         med_filtre = med_filtre[med_filtre["commune"] == commune_f]
-    if del_zone_f != "Tous" and "delegue_zone" in med_filtre.columns:
+    if del_zone_f != "Tous"   and "delegue_zone" in med_filtre.columns:
         med_filtre = med_filtre[med_filtre["delegue_zone"] == del_zone_f]
     if recherche:
         mask = med_filtre.apply(
@@ -574,7 +739,6 @@ with tab4:
 
     st.markdown(f"**{len(med_filtre)} médecin(s) trouvé(s)**")
     st.divider()
-
     cols_aff = ["nom","prenom","specialite_libelle","commune","code_postal","couvert","delegue_zone"]
     cols_ok  = [c for c in cols_aff if c in med_filtre.columns]
     affich   = med_filtre[cols_ok].copy()
@@ -591,7 +755,7 @@ with tab4:
     med_filtre.to_excel(buf2, index=False, engine="openpyxl")
     buf2.seek(0)
     st.download_button(
-        label=f"⬇️ Exporter ce tableau ({len(med_filtre)} lignes) en Excel",
+        label=f"⬇️ Exporter ({len(med_filtre)} lignes) en Excel",
         data=buf2,
         file_name=f"medecins_filtre_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -603,7 +767,6 @@ with tab4:
 # ══════════════════════════════════════════════
 with tab5:
     st.markdown("### 📥 Export complet")
-
     col_a, col_b = st.columns(2)
     with col_a:
         st.markdown("""
@@ -620,25 +783,19 @@ with tab5:
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             use_container_width=True
         )
-
     with col_b:
         st.markdown("""
         <div style='background:#eff6ff;border:1px solid #93c5fd;border-radius:12px;padding:1.2rem;'>
             <p style='font-weight:600;color:#1e40af;margin:0 0 .4rem'>🗺️ Carte HTML</p>
-            <p style='font-size:.82rem;color:#1e40af;margin:0'>Carte interactive téléchargeable · Ctrl+P pour PDF</p>
+            <p style='font-size:.82rem;color:#1e40af;margin:0'>Carte interactive · Ctrl+P pour PDF</p>
         </div>""", unsafe_allow_html=True)
         st.markdown("<br>", unsafe_allow_html=True)
         m_exp = folium.Map(location=[46.6, 2.3], zoom_start=6, tiles="CartoDB positron")
         for _, d in del_f.iterrows():
             folium.Circle(location=[d.latitude, d.longitude], radius=RAYON_KM*1000,
                 color="#ef4444", fill=True, fill_color="#fca5a5", fill_opacity=0.1, weight=2).add_to(m_exp)
-            folium.Marker(location=[d.latitude, d.longitude],
-                tooltip=f"🔴 {d['nom']}",
+            folium.Marker(location=[d.latitude, d.longitude], tooltip=f"🔴 {d['nom']}",
                 icon=folium.Icon(color="red", icon="user", prefix="fa")).add_to(m_exp)
-        for _, med in med_couverts.iterrows():
-            folium.CircleMarker(location=[med.latitude, med.longitude],
-                radius=4, color="#3b82f6", fill=True, fill_color="#3b82f6",
-                fill_opacity=0.8, weight=1).add_to(m_exp)
         carte_html = f"""<!DOCTYPE html><html><head><meta charset='UTF-8'>
         <title>CoverMap</title></head><body style='margin:0'>{m_exp._repr_html_()}</body></html>"""
         st.download_button(
@@ -656,3 +813,10 @@ with tab5:
         "Valeur": [len(del_f), len(med_avec_couverture), len(med_couverts),
                    len(med_non_couverts), len(med_reseau), len(visites_df), f"{taux_couv}%"]
     }), use_container_width=True, hide_index=True)
+
+# ══════════════════════════════════════════════
+# TAB ADMIN — GESTION UTILISATEURS
+# ══════════════════════════════════════════════
+if is_admin and tab_admin:
+    with tab_admin:
+        page_admin_users()
