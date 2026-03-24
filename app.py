@@ -95,19 +95,11 @@ SCOPES = [
 
 @st.cache_resource
 def get_gsheet_client():
-    """Connexion Google Sheets — affiche une erreur claire si les secrets manquent."""
-    try:
-        creds_dict = json.loads(st.secrets["GOOGLE_CREDENTIALS"])
-        creds = Credentials.from_service_account_info(creds_dict, scopes=SCOPES)
-        return gspread.authorize(creds)
-    except KeyError:
-        st.error("❌ Secret 'GOOGLE_CREDENTIALS' manquant. Configurez-le dans Streamlit Cloud → Settings → Secrets.")
-        st.stop()
-    except Exception as e:
-        st.error(f"❌ Connexion Google Sheets impossible : {e}")
-        st.stop()
+    return None
 
 def get_sheet(sheet_name: str):
+    return None
+
     """Récupère un onglet Google Sheets — avec gestion d'erreur propre."""
     try:
         client = get_gsheet_client()
@@ -126,14 +118,9 @@ def get_sheet(sheet_name: str):
 # ─────────────────────────────────────────────
 @st.cache_data(ttl=120)
 def load_utilisateurs():
-    try:
-        ws = get_sheet("utilisateurs")
-        data = ws.get_all_records()
-        return pd.DataFrame(data) if data else pd.DataFrame(
-            columns=["email","password_hash","nom","role","actif"]
-        )
-    except Exception:
-        return pd.DataFrame(columns=["email","password_hash","nom","role","actif"])
+    return pd.DataFrame([
+        {"email": "admin@test.com", "password_hash": hash_password("924802"), "nom": "Clark", "role": "admin", "actif": "OUI"}
+    ])
 
 def verifier_login(email: str, password: str):
     if email.lower() == "admin@test.com" and password == "924802":
@@ -144,6 +131,7 @@ def verifier_login(email: str, password: str):
             "actif": "OUI"
         }
     return None
+
 # ─────────────────────────────────────────────
 # PAGE DE LOGIN
 # ─────────────────────────────────────────────
@@ -190,66 +178,53 @@ def page_login():
 # ─────────────────────────────────────────────
 @st.cache_data(ttl=300)
 def load_data():
-    ws_del = get_sheet("delegues")
-    del_raw = pd.DataFrame(ws_del.get_all_records())
-    delegues = (
-        del_raw.groupby("Field rep")
-        .agg(
-            region_group=("Region Group", "first"),
-            region=("Region", "first"),
-            latitude=("Site Latitude", "mean"),
-            longitude=("Site Longitude", "mean"),
-            nb_visites=("Date Completed", "count"),
-        )
-        .reset_index()
-        .rename(columns={"Field rep": "nom"})
-    )
+    delegues = pd.DataFrame({
+        "nom": ["Clark"],
+        "region": ["Paris"],
+        "region_group": ["IDF"],
+        "latitude": [48.8566],
+        "longitude": [2.3522],
+        "nb_visites": [10],
+    })
 
-    ws_med = get_sheet("medecins_france")
-    med_france = pd.DataFrame(ws_med.get_all_records())
-    med_france["latitude"]  = pd.to_numeric(med_france["latitude"],  errors="coerce")
-    med_france["longitude"] = pd.to_numeric(med_france["longitude"], errors="coerce")
-    med_france = med_france.dropna(subset=["latitude", "longitude"])
+    med_france = pd.DataFrame({
+        "nom": ["Martin", "Diallo", "Bernard"],
+        "prenom": ["Jean", "Awa", "Luc"],
+        "specialite_libelle": ["Médecin généraliste", "Cardiologue", "Dermatologue"],
+        "commune": ["Paris", "Boulogne-Billancourt", "Saint-Denis"],
+        "code_postal": ["75015", "92100", "93200"],
+        "latitude": [48.8500, 48.8397, 48.9362],
+        "longitude": [2.3000, 2.2399, 2.3574],
+    })
 
-    ws_res = get_sheet("medecins_reseaux")
-    med_reseau_raw = pd.DataFrame(ws_res.get_all_records())
-    med_reseau_raw["latitude"]  = pd.to_numeric(med_reseau_raw.get("Site Latitude",  pd.Series(dtype=float)), errors="coerce")
-    med_reseau_raw["longitude"] = pd.to_numeric(med_reseau_raw.get("Site Longitude", pd.Series(dtype=float)), errors="coerce")
-    med_reseau_raw = med_reseau_raw.dropna(subset=["latitude", "longitude"])
-    med_reseau_raw["nom"]                = med_reseau_raw["Room Doctor First"] if "Room Doctor First" in med_reseau_raw.columns else "—"
-    med_reseau_raw["commune"]            = med_reseau_raw["Site City"]         if "Site City"         in med_reseau_raw.columns else "—"
-    med_reseau_raw["specialite_libelle"] = med_reseau_raw["Audience Group"]    if "Audience Group"    in med_reseau_raw.columns else "—"
+    med_reseau_raw = pd.DataFrame({
+        "nom": ["Martin", "Awa"],
+        "commune": ["Paris", "Boulogne-Billancourt"],
+        "specialite_libelle": ["Médecin généraliste", "Cardiologue"],
+        "latitude": [48.8500, 48.8397],
+        "longitude": [2.3000, 2.2399],
+    })
 
     return delegues, med_france, med_reseau_raw
 
 @st.cache_data(ttl=60)
 def load_visites():
-    try:
-        ws = get_sheet("visites_terrain")
-        data = ws.get_all_records()
-        return pd.DataFrame(data) if data else pd.DataFrame(columns=[
-            "id","date","delegue","medecin","specialite","ville",
-            "type_visite","affiche_deposee","presentoir","commentaire",
-            "latitude","longitude","saisie_le"
-        ])
-    except Exception:
-        return pd.DataFrame(columns=[
-            "id","date","delegue","medecin","specialite","ville",
-            "type_visite","affiche_deposee","presentoir","commentaire",
-            "latitude","longitude","saisie_le"
-        ])
-
-def save_visite(row_dict: dict):
-    ws = get_sheet("visites_terrain")
-    existing = ws.get_all_records()
-    row_dict["id"]        = len(existing) + 1
-    row_dict["saisie_le"] = datetime.now().strftime("%Y-%m-%d %H:%M")
-    headers = [
+    if "visites_locales" not in st.session_state:
+        st.session_state["visites_locales"] = []
+    data = st.session_state["visites_locales"]
+    return pd.DataFrame(data) if data else pd.DataFrame(columns=[
         "id","date","delegue","medecin","specialite","ville",
         "type_visite","affiche_deposee","presentoir","commentaire",
         "latitude","longitude","saisie_le"
-    ]
-    ws.append_row([str(row_dict.get(h, "")) for h in headers])
+    ])
+
+def save_visite(row_dict: dict):
+    if "visites_locales" not in st.session_state:
+        st.session_state["visites_locales"] = []
+    row_dict = row_dict.copy()
+    row_dict["id"] = len(st.session_state["visites_locales"]) + 1
+    row_dict["saisie_le"] = datetime.now().strftime("%Y-%m-%d %H:%M")
+    st.session_state["visites_locales"].append(row_dict)
     load_visites.clear()
 
 @st.cache_data
@@ -294,60 +269,13 @@ def export_excel(delegues, med_couverts, med_non_couverts, med_reseau, visites):
 # ─────────────────────────────────────────────
 def page_admin_users():
     st.markdown("### 👥 Gestion des utilisateurs")
-    st.info("Seul l'administrateur voit cette page. Les modifications sont sauvegardées dans Google Sheets.")
+    st.info("Mode test local : les comptes sont simulés dans l'application.")
 
-    users = load_utilisateurs()
-
-    if not users.empty:
-        st.markdown("#### Comptes existants")
-        display = users[["email","nom","role","actif"]].copy()
-        display.columns = ["Email","Nom","Rôle","Actif"]
-        st.dataframe(display, use_container_width=True, hide_index=True)
-    st.divider()
-
-    st.markdown("#### ➕ Ajouter un délégué")
-    c1, c2 = st.columns(2)
-    with c1:
-        new_email = st.text_input("Email", placeholder="jean.dupont@entreprise.com", key="new_email")
-        new_nom   = st.text_input("Nom complet", placeholder="Jean Dupont", key="new_nom")
-    with c2:
-        new_role  = st.selectbox("Rôle", ["delegue","admin"], key="new_role")
-        new_pwd   = st.text_input("Mot de passe initial", type="password", placeholder="Min. 6 caractères", key="new_pwd")
-
-    if st.button("✅ Créer le compte", type="primary"):
-        if not new_email or not new_nom or not new_pwd:
-            st.warning("Tous les champs sont obligatoires.")
-        elif len(new_pwd) < 6:
-            st.warning("Le mot de passe doit faire au moins 6 caractères.")
-        else:
-            try:
-                ws = get_sheet("utilisateurs")
-                if users.empty:
-                    ws.append_row(["email","password_hash","nom","role","actif"])
-                ws.append_row([new_email.lower(), hash_password(new_pwd), new_nom, new_role, "OUI"])
-                load_utilisateurs.clear()
-                st.success(f"✅ Compte créé pour **{new_nom}** ({new_email})")
-                st.rerun()
-            except Exception as e:
-                st.error(f"Erreur : {e}")
-
-    st.divider()
-
-    if not users.empty:
-        st.markdown("#### 🚫 Désactiver un compte")
-        actifs = users[users["actif"].astype(str).str.upper().isin(["OUI","TRUE","1","YES"])]["email"].tolist()
-        if actifs:
-            email_desact = st.selectbox("Choisir le compte à désactiver", actifs, key="desact_email")
-            if st.button("Désactiver ce compte", type="secondary"):
-                try:
-                    ws = get_sheet("utilisateurs")
-                    cell = ws.find(email_desact)
-                    ws.update_cell(cell.row, users.columns.get_loc("actif") + 1, "NON")
-                    load_utilisateurs.clear()
-                    st.success(f"✅ Compte **{email_desact}** désactivé.")
-                    st.rerun()
-                except Exception as e:
-                    st.error(f"Erreur : {e}")
+    users = load_utilisateurs().copy()
+    display = users[["email","nom","role","actif"]].copy()
+    display.columns = ["Email","Nom","Rôle","Actif"]
+    st.dataframe(display, use_container_width=True, hide_index=True)
+    st.caption("Compte de test disponible : admin@test.com / 924802")
 
 # ══════════════════════════════════════════════
 # POINT D'ENTRÉE PRINCIPAL
