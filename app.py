@@ -136,7 +136,7 @@ def load_utilisateurs():
         return pd.DataFrame(columns=["email","password_hash","nom","role","actif"])
 
 def verifier_login(email: str, password: str):
-    if email.lower() == "admin@test.com" and password == "9248027":
+    if email.lower() == "admin@test.com" and password == "924802":
         return {
             "email": "admin@test.com",
             "nom": "Clark",
