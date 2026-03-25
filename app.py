@@ -278,15 +278,19 @@ def page_admin_users():
     st.caption("Compte de test disponible : admin@test.com / 924802")
 
 # ══════════════════════════════════════════════
-# POINT D'ENTRÉE PRINCIPAL
+# POINT D'ENTRÉE PRINCIPAL (SANS LOGIN)
 # ══════════════════════════════════════════════
 
-if "logged_in" not in st.session_state:
-    st.session_state["logged_in"] = False
+# Accès direct sans authentification
+if "user" not in st.session_state:
+    st.session_state["user"] = {
+        "email": "public@covermap.com",
+        "nom": "Clark",
+        "role": "admin"
+    }
 
-if not st.session_state["logged_in"]:
-    page_login()
-    st.stop()
+if "logged_in" not in st.session_state:
+    st.session_state["logged_in"] = True
 
 # ─────────────────────────────────────────────
 # APP PRINCIPALE (utilisateur connecté)
